@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Network Optimizer Pro</title>
+    <link
+      rel="stylesheet"
+      href="{{ url_for('static', filename='css/style.css') }}"
+    />
+    <script
+      type="text/javascript"
+      src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"
+    ></script>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <header>
+      <h1>Network <span>Optimizer Pro</span></h1>
+      <div id="status-badge" style="color: #00ff41">● Online</div>
+    </header>
+
+    <div class="container">
+      <aside class="sidebar">
+        <div class="card">
+          <h3>Escaneo de Red</h3>
+          <p style="font-size: 0.8rem; color: #777">
+            Detectar dispositivos automáticamente.
+          </p>
+          <button class="btn" id="btn-scan" onclick="scanNetwork()">
+            <span class="loader" id="scan-loader"></span> Iniciar Escaneo
+          </button>
+        </div>
+
+        <div class="card">
+          <h3>Agregar Manual</h3>
+          <input
+            type="text"
+            id="manual-ip"
+            placeholder="Dirección IP (ej. 192.168.1.50)"
+          />
+          <input type="text" id="manual-label" placeholder="Etiqueta" />
+          <button class="btn" onclick="addNodeManual()">Agregar Nodo</button>
+        </div>
+
+        <div class="card" id="selection-card" style="display:none; border-color: var(--accent-color);">
+            <h3>Nodo Seleccionado</h3>
+            <h4 id="selected-ip" style="margin: 0.5rem 0; color: #fff;">-</h4>
+            <div id="selected-details" style="font-size: 0.8rem; margin-bottom: 0.5rem; color: #aaa;"></div>
+            <button class="btn" onclick="scanSelectedPorts()">
+                 🔍 Escanear Puertos
+            </button>
+        </div>
+
+        <div class="card">
+          <h3>Optimización</h3>
+          <label>Algoritmo:</label>
+          <select id="algo-select">
+            <option value="mst">MST (Kruskal) - Árbol Mínimo</option>
+            <option value="shortest_path">Ruta Más Corta (Dijkstra)</option>
+          </select>
+
+          <div id="dijkstra-inputs" style="display: none; margin-top: 0.5rem">
+            <input type="text" id="src-node" placeholder="Nodo Origen ID" />
+            <input type="text" id="dst-node" placeholder="Nodo Destino ID" />
+          </div>
+
+          <button class="btn" onclick="runOptimization()">Ejecutar</button>
+        </div>
+
+        <div class="log-console" id="console">
+          <div class="log-entry">> System initialized...</div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <div id="network-graph"></div>
+
+        <div class="stats-panel">
+          <h3 style="margin: 0; color: #fff">Status</h3>
+          <div id="stats-content">
+            Nodes: <span id="nodes-count">0</span><br />
+            Edges: <span id="edges-count">0</span><br />
+            Local IP: <span id="local-ip">--</span>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      // Initialize VIS Network
+      var network = null;
+      var nodes = new vis.DataSet([]);
+      var edges = new vis.DataSet([]);
+
+      function initGraph() {
+        var container = document.getElementById("network-graph");
+        var data = { nodes: nodes, edges: edges };
+        var options = {
+          nodes: {
+            shape: "dot",
+            size: 20,
+            font: { size: 14, color: "#ffffff" },
+            borderWidth: 2,
+            shadow: true,
+          },
+          edges: {
+            width: 2,
+            color: { color: "#cccccc", highlight: "#00ff41" },
+            shadow: true,
+            smooth: { type: "continuous" },
+          },
+          physics: {
+            stabilization: false,
+            barnesHut: {
+              gravitationalConstant: -8000,
+              springConstant: 0.04,
+              springLength: 95,
+            },
+          },
+          interaction: {
+            hover: true,
+            tooltipDelay: 200,
+          },
+        };
+        network = new vis.Network(container, data, options);
+
+        network.on("click", function (params) {
+          if (params.nodes.length > 0) {
+            const nodeId = params.nodes[0];
+            const nodeData = nodes.get(nodeId);
+            
+            // Log
+            log("Selected Node: " + nodeId);
+            
+            // Update selection panel
+            document.getElementById('selection-card').style.display = 'block';
+            document.getElementById('selected-ip').innerText = nodeId;
+            
+            // Parse title for details (hacky but works for now as title is text)
+            // Or better: store data in node object
+            let details = "MAC/Vendor: Ver tooltip";
+            if(nodeData.title) details = nodeData.title.replace(/\n/g, "<br>");
+            document.getElementById('selected-details').innerHTML = details;
+
+            // Auto-fill Dijkstra
+            const src = document.getElementById("src-node");
+            const dst = document.getElementById("dst-node");
+            if (document.getElementById("algo-select").value === "shortest_path") {
+              if (!src.value) src.value = nodeId;
+              else if (!dst.value) dst.value = nodeId;
+            }
+          } else {
+            // Deselect
+            document.getElementById('selection-card').style.display = 'none';
+          }
+        });
+      }
+
+      function log(msg, type = "info") {
+        const consoleDiv = document.getElementById("console");
+        const entry = document.createElement("div");
+        entry.className = "log-entry " + type;
+        const time = new Date().toLocaleTimeString();
+        entry.innerText = `[${time}] ${msg}`;
+        consoleDiv.appendChild(entry);
+        consoleDiv.scrollTop = consoleDiv.scrollHeight;
+      }
+      
+      async function scanSelectedPorts() {
+          const ip = document.getElementById('selected-ip').innerText;
+          log(`Scanning ports for ${ip}...`, 'info');
+          
+          try {
+              const res = await fetch('/api/scan_ports', {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({ip: ip})
+              });
+              const data = await res.json();
+              if(data.open_ports && data.open_ports.length > 0) {
+                  let msg = "Open Ports:\n";
+                  data.open_ports.forEach(p => {
+                      msg += ` - ${p.port} (${p.banner || 'unknown'})\n`;
+                  });
+                  log(msg, 'success');
+                  alert(msg); // simple alert for visibility
+              } else {
+                  log("No common open ports found.", 'warning');
+                  alert("No se encontraron puertos abiertos comunes.");
+              }
+          } catch(e) {
+              log("Error scanning ports: " + e, 'error');
+          }
+      }
+
+      async function scanNetwork() {
+        const btn = document.getElementById("btn-scan");
+        const loader = document.getElementById("scan-loader");
+
+        btn.disabled = true;
+        loader.style.display = "inline-block";
+        log("Starting network scan... (This may take a few seconds)");
+
+        try {
+          const res = await fetch("/api/scan", { method: "POST" });
+          const data = await res.json();
+
+          if (data.status === "success") {
+            log(
+              `Scan complete. Found ${data.devices_found} devices.`,
+              "success"
+            );
+            document.getElementById("local-ip").innerText = data.local_ip;
+            refreshGraph();
+          } else {
+            log("Error: " + data.message, "error");
+          }
+        } catch (e) {
+          log("Network error during scan.", "error");
+        } finally {
+          btn.disabled = false;
+          loader.style.display = "none";
+        }
+      }
+
+      async function addNodeManual() {
+        const ip = document.getElementById("manual-ip").value;
+        const label = document.getElementById("manual-label").value;
+
+        if (!ip) {
+          log("IP Address required", "error");
+          return;
+        }
+
+        const res = await fetch("/api/manual_add", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ip, label }),
+        });
+        refreshGraph();
+      }
+
+      async function refreshGraph() {
+        const res = await fetch("/api/graph");
+        const data = await res.json();
+
+        nodes.clear();
+        edges.clear();
+        nodes.add(data.nodes);
+        edges.add(data.edges);
+
+        document.getElementById("nodes-count").innerText = data.nodes.length;
+        document.getElementById("edges-count").innerText = data.edges.length;
+      }
+
+      async function runOptimization() {
+        const algo = document.getElementById("algo-select").value;
+        const payload = { algorithm: algo };
+
+        if (algo === "shortest_path") {
+          payload.source = document.getElementById("src-node").value;
+          payload.target = document.getElementById("dst-node").value;
+          if (!payload.source || !payload.target) {
+            log("Source and Target required for Dijkstra", "error");
+            return;
+          }
+        }
+
+        log(`Running ${algo}...`);
+        const res = await fetch("/api/optimize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (!res.ok) {
+          const err = await res.json();
+          log("Error: " + err.error, "error");
+          return;
+        }
+
+        const data = await res.json();
+        network.selectEdges([]); // clear selection
+
+        // Highlight result
+        if (data.edges) {
+          // Reset all edges to default color
+          const updates = [];
+          edges.forEach((e) => {
+            updates.push({ id: e.id, color: { color: "#cccccc" } });
+          });
+          edges.update(updates);
+
+          // Highlight path/tree
+          const highlightUpdates = [];
+          let foundEdges = 0;
+
+          // Need to match edges in graph with result edges
+          // Result edges might be directed in output but undirected in graph
+          data.edges.forEach((pathEdge) => {
+            const existing = edges.get({
+              filter: function (item) {
+                return (
+                  (item.from == pathEdge.from && item.to == pathEdge.to) ||
+                  (item.from == pathEdge.to && item.to == pathEdge.from)
+                );
+              },
+            });
+            if (existing.length > 0) {
+              highlightUpdates.push({
+                id: existing[0].id,
+                color: { color: "#ff0044", opacity: 1.0 },
+                width: 4,
+              });
+              foundEdges++;
+            }
+          });
+          edges.update(highlightUpdates);
+
+          const cost = data.cost || "N/A";
+          log(
+            `Optimization done. Cost: ${cost}. Highlighted ${foundEdges} edges.`,
+            "success"
+          );
+        }
+      }
+
+      // UI Helpers
+      document
+        .getElementById("algo-select")
+        .addEventListener("change", function (e) {
+          const val = e.target.value;
+          document.getElementById("dijkstra-inputs").style.display =
+            val === "shortest_path" ? "block" : "none";
+        });
+
+      // Init
+      window.onload = function () {
+        initGraph();
+        refreshGraph(); // Load initial empty or if server has state
+      };
+    </script>
+  </body>
+</html>
